@@ -9,9 +9,18 @@ import SwiftUI
 
 @main
 struct FlowMateApp: App {
+    @StateObject private var tracker = ActivityTracker()
+
+    init() {
+        #if os(macOS)
+        AccessibilityPermission.ensure()
+        #endif
+    }
+
     var body: some Scene {
         WindowGroup {
             ContentView()
+                .environmentObject(tracker)
         }
     }
 }
