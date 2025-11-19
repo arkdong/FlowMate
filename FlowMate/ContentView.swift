@@ -14,9 +14,11 @@ struct ContentView: View {
             currentSession: tracker.currentSession,
             highlights: tracker.latestHighlights(maxCount: 2),
             dailyGoalHours: $dailyGoalHours,
-            onClose: { dismiss() }
+            isTrackingEnabled: tracker.isTrackingEnabled,
+            onClose: { dismiss() },
+            toggleTracking: { tracker.setTrackingEnabled(!tracker.isTrackingEnabled) }
         )
-        .frame(minWidth: 440, minHeight: 360)
+        .frame(minWidth: 440, minHeight: 350)
         .background(Color.clear)
         #if os(macOS)
         .background(TransparentWindowConfigurator().allowsHitTesting(false))
@@ -29,16 +31,25 @@ struct GlassDashboard: View {
     let currentSession: ActivitySession?
     let highlights: [ActivitySession]
     @Binding var dailyGoalHours: Double
+    let isTrackingEnabled: Bool
     var onClose: (() -> Void)?
+    let toggleTracking: () -> Void
 
     @State private var isGoalEditorPresented = false
+    @State private var isFocusPromptPresented = false
+    private let defaultFocusDuration: TimeInterval = 2 * 60 * 60
+    @State private var focusDuration: TimeInterval = 2 * 60 * 60
 
     var body: some View {
         VStack(alignment: .leading, spacing: 18) {
-            if let onClose {
-                CloseButton(action: onClose)
-                    .padding(.bottom, 4)
+            HStack {
+                if let onClose {
+                    CloseButton(action: onClose)
+                }
+                Spacer()
+                TrackingStatusToggle(isActive: isTrackingEnabled, toggle: toggleTracking)
             }
+            .padding(.bottom, 4)
 
             #if os(macOS)
             if !AccessibilityPermission.isGranted {
@@ -73,14 +84,25 @@ struct GlassDashboard: View {
                 editGoal: { isGoalEditorPresented = true }
             )
 
-            HStack(spacing: 12) {
-                DashboardPill(icon: "bolt.fill", text: currentSession?.appName ?? "Idle")
-                DashboardPill(icon: "text.alignleft",
-                              text: currentSession?.latestContext?.contentSnippet
-                                ?? currentSession?.latestContext?.readableDescription
-                                ?? "No active context")
+            Button {
+                focusDuration = defaultFocusDuration
+                isFocusPromptPresented = true
+            } label: {
+                Label("Focus", systemImage: "target")
+                    .font(.headline.weight(.semibold))
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 14)
+                    .background(
+                        RoundedRectangle(cornerRadius: 20, style: .continuous)
+                            .fill(LinearGradient(colors: [.blue.opacity(0.9), .cyan.opacity(0.8)],
+                                                 startPoint: .leading,
+                                                 endPoint: .trailing))
+                    )
+                    .foregroundStyle(.white)
+                    .shadow(color: .blue.opacity(0.3), radius: 12, y: 6)
             }
-            .padding(.top, 4)
+            .buttonStyle(.plain)
+            .padding(.top, 12)
 
             if displayedSessions.isEmpty {
                 Text("No sessions recorded yet. Start working in any app to see activity here.")
@@ -125,6 +147,15 @@ struct GlassDashboard: View {
         .sheet(isPresented: $isGoalEditorPresented) {
             GoalEditorView(hours: $dailyGoalHours)
                 .presentationDetents([.fraction(0.25)])
+        }
+        .overlay {
+            if isFocusPromptPresented {
+                FocusPrompt(duration: $focusDuration,
+                            isPresented: $isFocusPromptPresented,
+                            action: {
+                                // Start focus timer logic placeholder
+                            })
+            }
         }
     }
 
@@ -228,6 +259,32 @@ struct DashboardPill: View {
     }
 }
 
+struct TrackingStatusToggle: View {
+    let isActive: Bool
+    let toggle: () -> Void
+
+    var body: some View {
+        Button(action: toggle) {
+            Label {
+                Text(isActive ? "Active" : "Paused")
+                    .font(.caption.weight(.semibold))
+            } icon: {
+                Image(systemName: isActive ? "play.fill" : "pause.fill")
+                    .font(.caption.weight(.bold))
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
+            .background(
+                Capsule(style: .continuous)
+                    .fill((isActive ? Color.green : Color.red).opacity(0.25))
+            )
+            .foregroundStyle(isActive ? Color.green : Color.red)
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(isActive ? "Tracking active" : "Tracking paused")
+    }
+}
+
 struct SessionSummaryRow: View {
     let session: ActivitySession
     var referenceDate: Date = Date()
@@ -320,6 +377,77 @@ struct GoalEditorView: View {
     }
 }
 
+struct FocusPrompt: View {
+    @Binding var duration: TimeInterval
+    @Binding var isPresented: Bool
+    let action: () -> Void
+
+    var body: some View {
+        ZStack {
+            Color.black.opacity(0.35)
+                .ignoresSafeArea()
+                .onTapGesture {
+                    isPresented = false
+                }
+
+            VStack(spacing: 20) {
+                Text("Start Focus Session")
+                    .font(.title3.weight(.semibold))
+                Text("Choose how long you want to focus for this block.")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+
+                Text(duration.formattedFocus)
+                    .font(.system(size: 42, weight: .bold, design: .rounded))
+                    .monospacedDigit()
+
+                Slider(value: Binding(
+                    get: { duration / 60 },
+                    set: { duration = $0 * 60 }
+                ), in: 1...120, step: 1)
+
+                Button {
+                    action()
+                    isPresented = false
+                } label: {
+                    Text("Start")
+                        .font(.headline)
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 12)
+                        .background(
+                            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                                .fill(LinearGradient(colors: [.blue, .cyan], startPoint: .leading, endPoint: .trailing))
+                        )
+                        .foregroundStyle(.white)
+                }
+
+                Button("Cancel") {
+                    isPresented = false
+                }
+                .buttonStyle(.borderless)
+                .padding(.top, 4)
+            }
+            .padding(28)
+            .frame(maxWidth: 360)
+            .background(
+                RoundedRectangle(cornerRadius: 28, style: .continuous)
+                    .fill(.ultraThinMaterial)
+                    .background(
+                        RoundedRectangle(cornerRadius: 28, style: .continuous)
+                            .fill(Color.white.opacity(0.08))
+                            .blur(radius: 40)
+                    )
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 28, style: .continuous)
+                            .stroke(Color.white.opacity(0.2), lineWidth: 1)
+                    )
+            )
+            .shadow(color: .black.opacity(0.4), radius: 30, y: 20)
+        }
+    }
+}
+
 #if os(macOS)
 struct PermissionBanner: View {
     var body: some View {
@@ -394,7 +522,7 @@ struct TransparentWindowConfigurator: NSViewRepresentable {
         window.backgroundColor = .clear
         window.styleMask = [.borderless]
         window.hasShadow = true
-        window.isMovableByWindowBackground = true
+        window.isMovableByWindowBackground = false
         window.level = .normal
     }
 }
@@ -418,6 +546,16 @@ private extension TimeInterval {
             return String(format: "%dh %02dm", hours, minutes)
         }
         return String(format: "%02dm %02ds", minutes, seconds)
+    }
+
+    var formattedFocus: String {
+        let totalMinutes = max(Int(self / 60), 1)
+        let hours = totalMinutes / 60
+        let minutes = totalMinutes % 60
+        if hours > 0 {
+            return "\(hours)h \(minutes)m"
+        }
+        return "\(minutes)m"
     }
 }
 

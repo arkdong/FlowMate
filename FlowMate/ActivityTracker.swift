@@ -6,6 +6,7 @@ import AppKit
 final class ActivityTracker: ObservableObject {
     @Published private(set) var currentSession: ActivitySession?
     @Published private(set) var todaySessions: [ActivitySession] = []
+    @Published private(set) var isTrackingEnabled: Bool = true
 
     var totalFocusedTime: TimeInterval {
         let finished = todaySessions.reduce(0) { $0 + $1.duration }
@@ -61,11 +62,13 @@ final class ActivityTracker: ObservableObject {
     }
 
     private func tick() {
+        guard isTrackingEnabled else { return }
         objectWillChange.send()
         captureFrontmostApplication()
     }
 
     private func refreshCurrentContext(for app: NSRunningApplication) {
+        guard isTrackingEnabled else { return }
         guard var current = currentSession else { return }
         let context = inspector.captureContext(for: app)
         current.appendContext(context)
@@ -75,12 +78,14 @@ final class ActivityTracker: ObservableObject {
     private func startObservingWorkspace() {
         let center = NSWorkspace.shared.notificationCenter
         let activation = center.addObserver(forName: NSWorkspace.didActivateApplicationNotification, object: nil, queue: .main) { [weak self] notification in
+            guard self?.isTrackingEnabled == true else { return }
             guard let app = notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication else { return }
             self?.beginSession(for: app)
         }
         notifications.append(activation)
 
         let termination = center.addObserver(forName: NSWorkspace.didTerminateApplicationNotification, object: nil, queue: .main) { [weak self] notification in
+            guard self?.isTrackingEnabled == true else { return }
             guard let app = notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication else { return }
             if app.bundleIdentifier == self?.currentSession?.bundleIdentifier {
                 self?.finishCurrentSession()
@@ -98,6 +103,7 @@ final class ActivityTracker: ObservableObject {
     }
 
     private func beginSession(for app: NSRunningApplication) {
+        guard isTrackingEnabled else { return }
         if let ownBundleIdentifier, app.bundleIdentifier == ownBundleIdentifier {
             return
         }
@@ -131,11 +137,22 @@ final class ActivityTracker: ObservableObject {
     }
 
     private func captureFrontmostApplication() {
+        guard isTrackingEnabled else { return }
         guard let app = NSWorkspace.shared.frontmostApplication else {
             finishCurrentSession()
             return
         }
         beginSession(for: app)
+    }
+
+    func setTrackingEnabled(_ enabled: Bool) {
+        guard enabled != isTrackingEnabled else { return }
+        isTrackingEnabled = enabled
+        if enabled {
+            captureFrontmostApplication()
+        } else {
+            finishCurrentSession()
+        }
     }
 }
 #else
