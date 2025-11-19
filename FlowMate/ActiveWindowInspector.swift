@@ -10,8 +10,13 @@ final class ActiveWindowInspector {
 
     func captureContext(for application: NSRunningApplication) -> ActivityContext {
         let defaultTitle = application.localizedName ?? "Unknown App"
+        let timestamp = Date()
         guard AccessibilityPermission.isGranted else {
-            return ActivityContext(windowTitle: defaultTitle, url: nil, documentPath: nil, contentSnippet: nil)
+            return ActivityContext(windowTitle: defaultTitle,
+                                   url: nil,
+                                   documentPath: nil,
+                                   contentSnippet: nil,
+                                   capturedAt: timestamp)
         }
 
         let bundleID = application.bundleIdentifier ?? ""
@@ -32,18 +37,22 @@ final class ActiveWindowInspector {
             break
         }
 
-        return ActivityContext(windowTitle: title, url: nil, documentPath: info.documentPath, contentSnippet: nil)
+        return ActivityContext(windowTitle: title,
+                               url: info.documentPath.flatMap { URL(fileURLWithPath: $0) },
+                               documentPath: info.documentPath,
+                               contentSnippet: nil,
+                               capturedAt: timestamp)
     }
 
     private func chromeContext(defaultTitle: String) -> ActivityContext? {
         guard let tabInfo = fetchChromeTabInfo() else { return nil }
-        let snippet = tabInfo.snippet?.trimmingCharacters(in: .whitespacesAndNewlines)
         let url = URL(string: tabInfo.url)
         let windowTitle = tabInfo.title.isEmpty ? defaultTitle : tabInfo.title
         return ActivityContext(windowTitle: windowTitle,
                                url: url,
                                documentPath: nil,
-                               contentSnippet: snippet)
+                               contentSnippet: nil,
+                               capturedAt: Date())
     }
 
     private func fileBasedContext(title: String, documentAttribute: String?) -> ActivityContext? {
@@ -52,7 +61,8 @@ final class ActiveWindowInspector {
         return ActivityContext(windowTitle: title,
                                url: fileURL,
                                documentPath: fileURL.path,
-                               contentSnippet: snippet)
+                               contentSnippet: snippet,
+                               capturedAt: Date())
     }
 
     private func snippetFromFile(_ url: URL) -> String? {
@@ -75,19 +85,18 @@ final class ActiveWindowInspector {
         return URL(fileURLWithPath: attribute)
     }
 
-    private func fetchChromeTabInfo() -> (title: String, url: String, snippet: String?)? {
+    private func fetchChromeTabInfo() -> (title: String, url: String)? {
         let script = """
         tell application "Google Chrome"
             if (count of windows) = 0 then return {"", "", ""}
             set activeTab to active tab of front window
             set tabTitle to title of activeTab
             set tabURL to URL of activeTab
-            set tabSnippet to execute activeTab javascript "document.body.innerText.substring(0, \(snippetLimit))"
-            return {tabTitle, tabURL, tabSnippet}
+            return {tabTitle, tabURL}
         end tell
         """
-        guard let values = executeListAppleScript(script), values.count >= 3 else { return nil }
-        return (values[0], values[1], values[2])
+        guard let values = executeListAppleScript(script), values.count >= 2 else { return nil }
+        return (values[0], values[1])
     }
 
     private func focusedWindowInfo(for application: NSRunningApplication) -> (title: String?, documentPath: String?) {

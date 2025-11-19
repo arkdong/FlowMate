@@ -69,10 +69,13 @@ final class ActivityTracker: ObservableObject {
 
     private func refreshCurrentContext(for app: NSRunningApplication) {
         guard isTrackingEnabled else { return }
-        guard var current = currentSession else { return }
+        guard let current = currentSession else { return }
         let context = inspector.captureContext(for: app)
-        current.appendContext(context)
-        currentSession = current
+        if let latest = current.latestContext, latest.hasSameContent(as: context) {
+            return
+        }
+        finishCurrentSession(at: context.capturedAt)
+        beginSession(for: app, contextOverride: context, startDate: context.capturedAt)
     }
 
     private func startObservingWorkspace() {
@@ -102,23 +105,26 @@ final class ActivityTracker: ObservableObject {
         notifications.removeAll()
     }
 
-    private func beginSession(for app: NSRunningApplication) {
+    private func beginSession(for app: NSRunningApplication,
+                              contextOverride: ActivityContext? = nil,
+                              startDate: Date = Date()) {
         guard isTrackingEnabled else { return }
         if let ownBundleIdentifier, app.bundleIdentifier == ownBundleIdentifier {
             return
         }
         if let current = currentSession {
-            if current.bundleIdentifier == app.bundleIdentifier {
+            if current.bundleIdentifier == app.bundleIdentifier,
+               contextOverride == nil {
                 refreshCurrentContext(for: app)
                 return
             }
-            finishCurrentSession()
+            finishCurrentSession(at: startDate)
         }
-        let context = inspector.captureContext(for: app)
+        let context = contextOverride ?? inspector.captureContext(for: app)
         let appName = app.localizedName ?? app.bundleIdentifier ?? "Unknown"
         currentSession = ActivitySession(appName: appName,
                                          bundleIdentifier: app.bundleIdentifier ?? "unknown",
-                                         startDate: Date(),
+                                         startDate: contextOverride?.capturedAt ?? startDate,
                                          initialContext: context)
     }
 

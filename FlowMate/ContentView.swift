@@ -1,12 +1,14 @@
 import SwiftUI
 #if os(macOS)
 import AppKit
+import Combine
 #endif
 
 struct ContentView: View {
     @Environment(\.dismiss) private var dismiss
     @EnvironmentObject private var tracker: ActivityTracker
     @AppStorage("dailyGoalHours") private var dailyGoalHours: Double = 4
+    @State private var isFocusPromptVisible = false
 
     var body: some View {
         GlassDashboard(
@@ -16,17 +18,20 @@ struct ContentView: View {
             dailyGoalHours: $dailyGoalHours,
             isTrackingEnabled: tracker.isTrackingEnabled,
             onClose: { dismiss() },
-            toggleTracking: { tracker.setTrackingEnabled(!tracker.isTrackingEnabled) }
+            toggleTracking: { tracker.setTrackingEnabled(!tracker.isTrackingEnabled) },
+            focusPromptVisibilityChanged: { isFocusPromptVisible = $0 }
         )
         .frame(minWidth: 440, minHeight: 350)
         .background(Color.clear)
         #if os(macOS)
-        .background(TransparentWindowConfigurator().allowsHitTesting(false))
+        .background(TransparentWindowConfigurator(isMovableByBackground: !isFocusPromptVisible).allowsHitTesting(false))
         #endif
     }
 }
 
 struct GlassDashboard: View {
+    @EnvironmentObject private var tracker: ActivityTracker
+
     let totalDuration: TimeInterval
     let currentSession: ActivitySession?
     let highlights: [ActivitySession]
@@ -34,11 +39,20 @@ struct GlassDashboard: View {
     let isTrackingEnabled: Bool
     var onClose: (() -> Void)?
     let toggleTracking: () -> Void
+    let focusPromptVisibilityChanged: (Bool) -> Void
 
     @State private var isGoalEditorPresented = false
     @State private var isFocusPromptPresented = false
     private let defaultFocusDuration: TimeInterval = 2 * 60 * 60
     @State private var focusDuration: TimeInterval = 2 * 60 * 60
+    @State private var activeSession: FocusSession?
+    @State private var sessionTimer = Timer.publish(every: 1, on: .main, in: .common).autoconnect()
+    @State private var activeFocusRecord: FocusSessionRecord?
+    @State private var focusHistory: [FocusSessionRecord] = []
+    @State private var lastSessionCount: Int = 0
+    @State private var summaryRecord: FocusSessionRecord?
+    @State private var summaryText: String?
+    @State private var summaryLoading = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 18) {
@@ -57,52 +71,23 @@ struct GlassDashboard: View {
             }
             #endif
 
-            Label {
-                Text("Today")
-                    .font(.system(size: 24, weight: .semibold, design: .rounded))
-            } icon: {
-                Image(systemName: "hourglass")
-                    .font(.system(size: 22, weight: .semibold))
-            }
-            .foregroundStyle(.primary)
-            .symbolRenderingMode(.multicolor)
-            .padding(.bottom, -8)
-
-            VStack(alignment: .leading, spacing: 4) {
-                Text(totalDuration.formattedClockStyle)
-                    .font(.system(size: 56, weight: .semibold, design: .rounded))
-                    .monospacedDigit()
-                    .contentTransition(.numericText())
-                Text("Tracked focus time")
-                    .font(.subheadline)
-                    .foregroundStyle(.secondary)
-            }
+            SessionHeader(activeSession: activeSession, totalDuration: totalDuration)
 
             GlassProgressView(
-                value: min(goalProgress, 1),
+                value: progressValue,
                 dailyGoalHours: dailyGoalHours,
-                editGoal: { isGoalEditorPresented = true }
+                editGoal: { isGoalEditorPresented = true },
+                activeSession: activeSession
             )
 
-            Button {
-                focusDuration = defaultFocusDuration
-                isFocusPromptPresented = true
-            } label: {
-                Label("Focus", systemImage: "target")
-                    .font(.headline.weight(.semibold))
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 14)
-                    .background(
-                        RoundedRectangle(cornerRadius: 20, style: .continuous)
-                            .fill(LinearGradient(colors: [.blue.opacity(0.9), .cyan.opacity(0.8)],
-                                                 startPoint: .leading,
-                                                 endPoint: .trailing))
-                    )
-                    .foregroundStyle(.white)
-                    .shadow(color: .blue.opacity(0.3), radius: 12, y: 6)
-            }
-            .buttonStyle(.plain)
-            .padding(.top, 12)
+            FocusControlButton(
+                activeSession: activeSession,
+                startAction: {
+                    focusDuration = defaultFocusDuration
+                    isFocusPromptPresented = true
+                },
+                stopAction: stopSession
+            )
 
             if displayedSessions.isEmpty {
                 Text("No sessions recorded yet. Start working in any app to see activity here.")
@@ -148,15 +133,54 @@ struct GlassDashboard: View {
             GoalEditorView(hours: $dailyGoalHours)
                 .presentationDetents([.fraction(0.25)])
         }
+        .onReceive(sessionTimer) { _ in
+            guard var session = activeSession else { return }
+            session.elapsed = Date().timeIntervalSince(session.startDate)
+            activeSession = session
+            if session.elapsed >= session.target {
+                stopSession()
+            }
+        }
+        .onReceive(sessionTimer) { _ in
+            guard var session = activeSession else { return }
+            session.elapsed = Date().timeIntervalSince(session.startDate)
+            activeSession = session
+            if session.elapsed >= session.target {
+                stopSession()
+            }
+        }
+        .onChange(of: tracker.todaySessions) { sessions in
+            guard var record = activeFocusRecord else {
+                lastSessionCount = sessions.count
+                return
+            }
+            let delta = sessions.count - lastSessionCount
+            if delta > 0 {
+                let newSessions = sessions.suffix(delta)
+                record.capturedSessions.append(contentsOf: newSessions)
+                activeFocusRecord = record
+            }
+            lastSessionCount = sessions.count
+        }
         .overlay {
             if isFocusPromptPresented {
                 FocusPrompt(duration: $focusDuration,
                             isPresented: $isFocusPromptPresented,
                             action: {
-                                // Start focus timer logic placeholder
+                                startSession()
                             })
             }
+            if let summary = summaryRecord {
+                FocusSummaryView(record: summary,
+                                 summaryText: summaryText,
+                                 isLoading: summaryLoading) {
+                    summaryRecord = nil
+                    summaryText = nil
+                    summaryLoading = false
+                }
+            }
         }
+        .onChange(of: isFocusPromptPresented) { focusPromptVisibilityChanged($0) }
     }
 
     private var goalProgress: Double {
@@ -167,37 +191,86 @@ struct GlassDashboard: View {
     private var displayedSessions: [ActivitySession] {
         Array(highlights.prefix(2))
     }
+
+    private var progressValue: Double {
+        if let session = activeSession {
+            return min(session.elapsed / session.target, 1)
+        }
+        return min(goalProgress, 1)
+    }
+
+    private func startSession() {
+        let startDate = Date()
+        activeSession = FocusSession(startDate: startDate, target: focusDuration, elapsed: 0)
+        activeFocusRecord = FocusSessionRecord(startDate: startDate,
+                                               target: focusDuration,
+                                               endDate: nil,
+                                               capturedSessions: [])
+        lastSessionCount = tracker.todaySessions.count
+        sessionTimer = Timer.publish(every: 1, on: .main, in: .common).autoconnect()
+        isFocusPromptPresented = false
+    }
+
+    private func stopSession() {
+        sessionTimer.upstream.connect().cancel()
+        if var record = activeFocusRecord {
+            record.endDate = Date()
+            focusHistory.append(record)
+            summaryRecord = record
+            summaryLoading = true
+            summaryText = nil
+            Task {
+                let service = GreenPTService.shared
+                let summary = await service.summarize(record: record)
+                await MainActor.run {
+                    summaryText = summary ?? "Summary unavailable."
+                    summaryLoading = false
+                }
+            }
+        }
+        activeSession = nil
+        activeFocusRecord = nil
+    }
 }
 
 struct GlassProgressView: View {
     let value: Double
     let dailyGoalHours: Double
     let editGoal: () -> Void
+    let activeSession: FocusSession?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             HStack {
-                Text("Daily Goal")
+                Text(activeSession == nil ? "Daily Goal" : "Session Progress")
                     .font(.caption)
                     .foregroundStyle(.secondary)
-                Button("Edit", action: editGoal)
-                    .font(.caption.bold())
-                    .buttonStyle(.borderless)
-                    .padding(.horizontal, 6)
-                    .padding(.vertical, 2)
-                    .background(
-                        Capsule(style: .continuous)
-                            .fill(Color.white.opacity(0.12))
-                    )
-                    .foregroundStyle(.primary)
+                if activeSession == nil {
+                    Button("Edit", action: editGoal)
+                        .font(.caption.bold())
+                        .buttonStyle(.borderless)
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 2)
+                        .background(
+                            Capsule(style: .continuous)
+                                .fill(Color.white.opacity(0.12))
+                        )
+                        .foregroundStyle(.primary)
+                }
                 Spacer()
-                Text("\(Int(value * 100))%")
+                Text(progressLabel)
                     .font(.caption.monospacedDigit())
                     .foregroundStyle(.primary)
             }
-            Text("\(dailyGoalHours, specifier: "%.1f")h goal")
-                .font(.caption2)
-                .foregroundStyle(.secondary)
+            if let session = activeSession {
+                Text("Target \(session.target.formattedFocus)")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            } else {
+                Text("\(dailyGoalHours, specifier: "%.1f")h goal")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
 
             GeometryReader { proxy in
                 let width = proxy.size.width
@@ -227,6 +300,44 @@ struct GlassProgressView: View {
             }
             .frame(height: 16)
         }
+    }
+
+    private var progressLabel: String {
+        if let session = activeSession {
+            return "\(Int(value * 100))% · \(session.elapsed.formattedFocus)"
+        }
+        return "\(Int(value * 100))%"
+    }
+}
+
+struct FocusControlButton: View {
+    let activeSession: FocusSession?
+    let startAction: () -> Void
+    let stopAction: () -> Void
+
+    var body: some View {
+        Button {
+            if activeSession == nil {
+                startAction()
+            } else {
+                stopAction()
+            }
+        } label: {
+            Label(activeSession == nil ? "Focus" : "Stop", systemImage: activeSession == nil ? "target" : "stop.fill")
+                .font(.headline.weight(.semibold))
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 14)
+                .background(
+                    RoundedRectangle(cornerRadius: 20, style: .continuous)
+                        .fill(activeSession == nil
+                              ? LinearGradient(colors: [.blue.opacity(0.9), .cyan.opacity(0.8)], startPoint: .leading, endPoint: .trailing)
+                              : LinearGradient(colors: [.red.opacity(0.9), .orange.opacity(0.8)], startPoint: .leading, endPoint: .trailing))
+                )
+                .foregroundStyle(.white)
+                .shadow(color: (activeSession == nil ? Color.blue : Color.red).opacity(0.3), radius: 12, y: 6)
+        }
+        .buttonStyle(.plain)
+        .padding(.top, 12)
     }
 }
 
@@ -377,6 +488,208 @@ struct GoalEditorView: View {
     }
 }
 
+struct FocusSummaryView: View {
+    let record: FocusSessionRecord
+    let summaryText: String?
+    let isLoading: Bool
+    let dismiss: () -> Void
+    @State private var expandedApps: Set<String> = []
+
+    var body: some View {
+        ZStack {
+            Color.black.opacity(0.45)
+                .ignoresSafeArea()
+                .onTapGesture { dismiss() }
+
+            VStack(alignment: .leading, spacing: 16) {
+                HStack {
+                    Text("Session Summary")
+                        .font(.title2.weight(.semibold))
+                    Spacer()
+                    Button(action: dismiss) {
+                        Image(systemName: "xmark.circle.fill")
+                            .imageScale(.large)
+                    }
+                    .buttonStyle(.plain)
+                }
+
+                Text(summaryDuration)
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+
+                if isLoading {
+                    HStack(spacing: 8) {
+                        ProgressView()
+                        Text("Summarizing session…")
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                    }
+                } else if let summaryText {
+                    Text("AI Summary: \(summaryText)")
+                        .font(.callout)
+                        .foregroundStyle(.primary)
+                        .padding(.vertical, 4)
+                }
+
+                if record.capturedSessions.isEmpty {
+                    Text("No app sessions recorded during this focus block.")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                } else {
+                    ScrollView {
+                        VStack(alignment: .leading, spacing: 12) {
+                            ForEach(groupedSummaries) { summary in
+                                DisclosureGroup(
+                                    isExpanded: Binding(
+                                        get: { expandedApps.contains(summary.appName) },
+                                        set: { expanded in
+                                            if expanded {
+                                                expandedApps.insert(summary.appName)
+                                            } else {
+                                                expandedApps.remove(summary.appName)
+                                            }
+                                        }
+                                    ),
+                                    content: {
+                                        VStack(alignment: .leading, spacing: 8) {
+                                            ForEach(summary.contexts) { usage in
+                                                VStack(alignment: .leading, spacing: 2) {
+                                                    HStack {
+                                                        Text(usage.duration.formattedBrief)
+                                                            .font(.caption.monospacedDigit())
+                                                        Spacer()
+                                                        Text(usage.context.capturedAt.formatted(date: .omitted, time: .shortened))
+                                                            .font(.caption2)
+                                                            .foregroundStyle(.secondary)
+                                                    }
+                                                    Text(detailText(for: usage.context))
+                                                        .font(.caption2)
+                                                        .foregroundStyle(.secondary)
+                                                        .lineLimit(2)
+                                                }
+                                                .padding(8)
+                                                .background(
+                                                    RoundedRectangle(cornerRadius: 12, style: .continuous)
+                                                        .fill(Color.white.opacity(0.05))
+                                                )
+                                            }
+                                        }
+                                        .padding(.top, 6)
+                                    },
+                                    label: {
+                                        HStack {
+                                            VStack(alignment: .leading, spacing: 2) {
+                                                Text(summary.appName)
+                                                    .font(.headline)
+                                                Text("\(summary.total.formattedFocus) · \(Int(summary.percent * 100))%")
+                                                    .font(.caption)
+                                                    .foregroundStyle(.secondary)
+                                            }
+                                            Spacer()
+                                        }
+                                        .padding(12)
+                                        .background(
+                                            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                                                .fill(.ultraThinMaterial)
+                                        )
+                                    }
+                                )
+                            }
+                        }
+                    }
+                    .frame(maxHeight: 280)
+                }
+
+                Button("Close") {
+                    dismiss()
+                }
+                .buttonStyle(.borderedProminent)
+                .frame(maxWidth: .infinity)
+            }
+            .padding(24)
+            .frame(maxWidth: 420)
+            .background(
+                RoundedRectangle(cornerRadius: 28, style: .continuous)
+                    .fill(.ultraThinMaterial)
+                    .background(
+                        RoundedRectangle(cornerRadius: 28, style: .continuous)
+                            .fill(Color.white.opacity(0.08))
+                            .blur(radius: 30)
+                    )
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 28, style: .continuous)
+                            .stroke(Color.white.opacity(0.2), lineWidth: 1)
+                    )
+            )
+            .shadow(color: .black.opacity(0.4), radius: 30, y: 20)
+        }
+    }
+
+    private var summaryDuration: String {
+        let end = record.endDate ?? Date()
+        let total = end.timeIntervalSince(record.startDate)
+        return "Duration: \(total.formattedFocus)"
+    }
+
+    private func detailText(for context: ActivityContext) -> String {
+        if let url = context.url {
+            return "\(context.windowTitle) · \(url.absoluteString)"
+        }
+        if let path = context.documentPath {
+            return "\(context.windowTitle) · \(path)"
+        }
+        return context.windowTitle
+    }
+
+    private var totalFocusDuration: TimeInterval {
+        max((record.endDate ?? Date()).timeIntervalSince(record.startDate), 1)
+    }
+
+    private var groupedSummaries: [AppSummary] {
+        let grouped = Dictionary(grouping: record.capturedSessions, by: { $0.appName })
+        let summaries = grouped.map { key, value -> AppSummary in
+            let total = value.reduce(0) { $0 + $1.duration }
+            let percent = total / totalFocusDuration
+            let contexts = value.flatMap { session in
+                contextUsage(for: session)
+            }
+            return AppSummary(appName: key,
+                              total: total,
+                              percent: percent,
+                              sessions: value,
+                              contexts: contexts)
+        }
+        return summaries.sorted { $0.total > $1.total }
+    }
+
+    private func contextUsage(for session: ActivitySession) -> [ContextUsage] {
+        guard !session.contexts.isEmpty else {
+            let duration = session.duration
+            let placeholder = ActivityContext(windowTitle: session.appName,
+                                              url: nil,
+                                              documentPath: nil,
+                                              contentSnippet: nil,
+                                              capturedAt: session.startDate)
+            return [ContextUsage(context: placeholder, duration: duration)]
+        }
+
+        let sorted = session.contexts.sorted { $0.capturedAt < $1.capturedAt }
+        var usages: [ContextUsage] = []
+        for (index, context) in sorted.enumerated() {
+            let start = context.capturedAt
+            let end: Date
+            if index + 1 < sorted.count {
+                end = sorted[index + 1].capturedAt
+            } else {
+                end = session.endDate ?? Date()
+            }
+            let duration = max(end.timeIntervalSince(start), 0)
+            usages.append(ContextUsage(context: context, duration: duration))
+        }
+        return usages
+    }
+}
+
 struct FocusPrompt: View {
     @Binding var duration: TimeInterval
     @Binding var isPresented: Bool
@@ -416,7 +729,7 @@ struct FocusPrompt: View {
                         .frame(maxWidth: .infinity)
                         .padding(.vertical, 12)
                         .background(
-                            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                            RoundedRectangle(cornerRadius: 16, style: .circular)
                                 .fill(LinearGradient(colors: [.blue, .cyan], startPoint: .leading, endPoint: .trailing))
                         )
                         .foregroundStyle(.white)
@@ -444,6 +757,44 @@ struct FocusPrompt: View {
                     )
             )
             .shadow(color: .black.opacity(0.4), radius: 30, y: 20)
+        }
+    }
+}
+
+struct SessionHeader: View {
+    let activeSession: FocusSession?
+    let totalDuration: TimeInterval
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Label {
+                Text(activeSession == nil ? "Today" : "Session")
+                    .font(.system(size: 24, weight: .semibold, design: .rounded))
+            } icon: {
+                Image(systemName: activeSession == nil ? "hourglass" : "target")
+                    .font(.system(size: 22, weight: .semibold))
+            }
+            .foregroundStyle(.primary)
+            .symbolRenderingMode(.multicolor)
+            .padding(.bottom, -8)
+
+            if let session = activeSession {
+                Text(session.elapsed.formattedClockStyle)
+                    .font(.system(size: 56, weight: .semibold, design: .rounded))
+                    .monospacedDigit()
+                    .contentTransition(.numericText())
+                Text("Elapsed focus time")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+            } else {
+                Text(totalDuration.formattedClockStyle)
+                    .font(.system(size: 56, weight: .semibold, design: .rounded))
+                    .monospacedDigit()
+                    .contentTransition(.numericText())
+                Text("Tracked focus time")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+            }
         }
     }
 }
@@ -500,6 +851,8 @@ struct CloseButton: View {
 
 #if os(macOS)
 struct TransparentWindowConfigurator: NSViewRepresentable {
+    let isMovableByBackground: Bool
+
     func makeNSView(context: Context) -> NSView {
         let view = NSView(frame: .zero)
         DispatchQueue.main.async {
@@ -522,13 +875,42 @@ struct TransparentWindowConfigurator: NSViewRepresentable {
         window.backgroundColor = .clear
         window.styleMask = [.borderless]
         window.hasShadow = true
-        window.isMovableByWindowBackground = false
+        window.isMovableByWindowBackground = isMovableByBackground
         window.level = .normal
     }
 }
 #endif
 
-private extension TimeInterval {
+struct FocusSession {
+    let startDate: Date
+    let target: TimeInterval
+    var elapsed: TimeInterval
+}
+
+struct FocusSessionRecord: Identifiable {
+    let id = UUID()
+    let startDate: Date
+    let target: TimeInterval
+    var endDate: Date?
+    var capturedSessions: [ActivitySession]
+}
+
+struct AppSummary: Identifiable {
+    let id = UUID()
+    let appName: String
+    let total: TimeInterval
+    let percent: Double
+    let sessions: [ActivitySession]
+    let contexts: [ContextUsage]
+}
+
+struct ContextUsage: Identifiable {
+    let id = UUID()
+    let context: ActivityContext
+    let duration: TimeInterval
+}
+
+extension TimeInterval {
     var formattedClockStyle: String {
         let totalSeconds = max(Int(self), 0)
         let hours = totalSeconds / 3600

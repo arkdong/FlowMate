@@ -5,6 +5,7 @@ struct ActivityContext: Codable, Equatable {
     var url: URL?
     var documentPath: String?
     var contentSnippet: String?
+    var capturedAt: Date
 
     var readableDescription: String {
         if let snippet = contentSnippet, !snippet.isEmpty {
@@ -16,6 +17,50 @@ struct ActivityContext: Codable, Equatable {
         } else {
             return windowTitle
         }
+    }
+    private enum CodingKeys: String, CodingKey {
+        case windowTitle
+        case url
+        case documentPath
+        case contentSnippet
+        case capturedAt
+    }
+
+    init(windowTitle: String,
+         url: URL?,
+         documentPath: String?,
+         contentSnippet: String?,
+         capturedAt: Date = Date()) {
+        self.windowTitle = windowTitle
+        self.url = url
+        self.documentPath = documentPath
+        self.contentSnippet = contentSnippet
+        self.capturedAt = capturedAt
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        windowTitle = try container.decode(String.self, forKey: .windowTitle)
+        url = try container.decodeIfPresent(URL.self, forKey: .url)
+        documentPath = try container.decodeIfPresent(String.self, forKey: .documentPath)
+        contentSnippet = try container.decodeIfPresent(String.self, forKey: .contentSnippet)
+        capturedAt = try container.decodeIfPresent(Date.self, forKey: .capturedAt) ?? Date()
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(windowTitle, forKey: .windowTitle)
+        try container.encodeIfPresent(url, forKey: .url)
+        try container.encodeIfPresent(documentPath, forKey: .documentPath)
+        try container.encodeIfPresent(contentSnippet, forKey: .contentSnippet)
+        try container.encode(capturedAt, forKey: .capturedAt)
+    }
+
+    func hasSameContent(as other: ActivityContext) -> Bool {
+        return windowTitle == other.windowTitle &&
+            url == other.url &&
+            documentPath == other.documentPath &&
+            contentSnippet == other.contentSnippet
     }
 }
 
