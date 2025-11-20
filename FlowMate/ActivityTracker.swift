@@ -20,7 +20,7 @@ final class ActivityTracker: ObservableObject {
     private var notifications: [NSObjectProtocol] = []
     private let calendar = Calendar.current
     private let ownBundleIdentifier = Bundle.main.bundleIdentifier
-    private let breakThreshold: TimeInterval = 1000 // testing threshold
+    private let breakThreshold: TimeInterval = 10 // testing threshold
     private var breakTimer: Timer?
     private var breakSessionID: UUID?
 
