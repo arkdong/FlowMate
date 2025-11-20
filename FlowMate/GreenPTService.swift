@@ -24,14 +24,95 @@ struct GreenPTService {
         var lines: [String] = []
         let duration = (record.endDate ?? Date()).timeIntervalSince(record.startDate).formattedFocus
         lines.append("Focus session duration: \(duration).")
-        lines.append("Apps used with time spent:")
-        let grouped = Dictionary(grouping: record.capturedSessions, by: { $0.appName })
-        for (app, sessions) in grouped {
-            let total = sessions.reduce(0) { $0 + $1.duration }.formattedFocus
-            lines.append("- \(app): \(total)")
+        let appSummary = Dictionary(grouping: record.capturedSessions, by: { $0.appName })
+            .map { ($0.key, $0.value.reduce(0) { $0 + $1.duration }) }
+            .sorted { $0.1 > $1.1 }
+        if !appSummary.isEmpty {
+            lines.append("Apps used with total time:")
+            for (app, total) in appSummary.prefix(5) {
+                let percent = total / max((record.endDate ?? Date()).timeIntervalSince(record.startDate), 1)
+                lines.append("- \(app): \(total.formattedFocus) (\(Int(percent * 100))%)")
+            }
         }
-        lines.append("Provide one sentence summary mentioning the primary activities.")
+
+        let topicAggregates = aggregateContexts(from: record)
+        if !topicAggregates.isEmpty {
+            lines.append("Primary topics/pages encountered:")
+            for aggregate in topicAggregates.prefix(8) {
+                lines.append("- \(aggregate.description): \(aggregate.duration.formattedFocus) (\(Int(aggregate.percent * 100))%)")
+            }
+        } else {
+            lines.append("No detailed context captured; infer from app usage only.")
+        }
+        lines.append("Provide one sentence summary emphasizing the main topic or task inferred from the descriptions above.")
         return lines.joined(separator: "\n")
+    }
+
+    private func aggregateContexts(from record: FocusSessionRecord) -> [ContextAggregate] {
+        let totalDuration = max((record.endDate ?? Date()).timeIntervalSince(record.startDate), 1)
+        var map: [String: ContextAggregate] = [:]
+
+        for session in record.capturedSessions {
+            for segment in contextSegments(for: session) {
+                let key = segment.key
+                if map[key] == nil {
+                    map[key] = ContextAggregate(description: segment.description, duration: 0, percent: 0)
+                }
+                map[key]?.duration += segment.duration
+            }
+        }
+
+        var aggregates = Array(map.values)
+        for index in aggregates.indices {
+            aggregates[index].percent = aggregates[index].duration / totalDuration
+        }
+        aggregates.sort { $0.duration > $1.duration }
+        return aggregates
+    }
+
+    private func contextSegments(for session: ActivitySession) -> [(key: String, description: String, duration: TimeInterval)] {
+        var segments: [(ActivityContext, Date)] = []
+        let contexts = session.contexts
+        if contexts.isEmpty {
+            let placeholder = ActivityContext(windowTitle: session.appName,
+                                              url: nil,
+                                              documentPath: nil,
+                                              contentSnippet: nil,
+                                              capturedAt: session.startDate)
+            segments.append((placeholder, session.endDate ?? Date()))
+        } else {
+            let sorted = contexts.sorted { $0.capturedAt < $1.capturedAt }
+            for (index, context) in sorted.enumerated() {
+                let endDate: Date
+                if index + 1 < sorted.count {
+                    endDate = sorted[index + 1].capturedAt
+                } else {
+                    endDate = session.endDate ?? Date()
+                }
+                segments.append((context, endDate))
+            }
+        }
+
+        return segments.compactMap { context, end in
+            let start = context.capturedAt
+            let duration = max(end.timeIntervalSince(start), 0)
+            let description = readableDescription(for: context)
+            let key = "\(context.windowTitle)|\(context.url?.absoluteString ?? "")|\(context.documentPath ?? "")"
+            return (key, description, duration)
+        }
+    }
+
+    private func readableDescription(for context: ActivityContext) -> String {
+        if let url = context.url {
+            return "\(context.windowTitle) (\(url.absoluteString))"
+        }
+        if let path = context.documentPath {
+            return "\(context.windowTitle) (\(path))"
+        }
+        if let snippet = context.contentSnippet, !snippet.isEmpty {
+            return "\(context.windowTitle) · \(snippet.prefix(80))"
+        }
+        return context.windowTitle
     }
 
     private func send(messages: [ChatMessage]) async -> String? {
@@ -72,4 +153,10 @@ struct GreenPTService {
 private struct ChatMessage {
     let role: String
     let content: String
+}
+
+private struct ContextAggregate {
+    let description: String
+    var duration: TimeInterval
+    var percent: Double
 }
