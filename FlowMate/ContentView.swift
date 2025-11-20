@@ -21,7 +21,7 @@ struct ContentView: View {
             toggleTracking: { tracker.setTrackingEnabled(!tracker.isTrackingEnabled) },
             focusPromptVisibilityChanged: { isFocusPromptVisible = $0 }
         )
-        .frame(minWidth: 440, minHeight: 350)
+        .frame()
         .background(Color.clear)
         #if os(macOS)
         .background(TransparentWindowConfigurator(isMovableByBackground: !isFocusPromptVisible).allowsHitTesting(false))
@@ -53,6 +53,9 @@ struct GlassDashboard: View {
     @State private var summaryRecord: FocusSessionRecord?
     @State private var summaryText: String?
     @State private var summaryLoading = false
+    @State private var focusGoal: String = ""
+    @State private var evaluatedSessions: Set<UUID> = []
+    private let minSessionDurationForEvaluation: TimeInterval = 30 // testing threshold
 
     var body: some View {
         VStack(alignment: .leading, spacing: 18) {
@@ -88,6 +91,9 @@ struct GlassDashboard: View {
                 },
                 stopAction: stopSession
             )
+            if activeSession == nil && (!focusHistory.isEmpty || activeFocusRecord != nil) {
+                LastSessionButton(latestRecord: focusHistory.last ?? activeFocusRecord)
+            }
 
             if displayedSessions.isEmpty {
                 Text("No sessions recorded yet. Start working in any app to see activity here.")
@@ -141,14 +147,6 @@ struct GlassDashboard: View {
                 stopSession()
             }
         }
-        .onReceive(sessionTimer) { _ in
-            guard var session = activeSession else { return }
-            session.elapsed = Date().timeIntervalSince(session.startDate)
-            activeSession = session
-            if session.elapsed >= session.target {
-                stopSession()
-            }
-        }
         .onChange(of: tracker.todaySessions) { sessions in
             guard var record = activeFocusRecord else {
                 lastSessionCount = sessions.count
@@ -159,6 +157,7 @@ struct GlassDashboard: View {
                 let newSessions = sessions.suffix(delta)
                 record.capturedSessions.append(contentsOf: newSessions)
                 activeFocusRecord = record
+                handleNewSessions(Array(newSessions))
             }
             lastSessionCount = sessions.count
         }
@@ -166,13 +165,14 @@ struct GlassDashboard: View {
             if isFocusPromptPresented {
                 FocusPrompt(duration: $focusDuration,
                             isPresented: $isFocusPromptPresented,
-                            action: {
+                            action: { goal in
+                                focusGoal = goal
                                 startSession()
                             })
             }
             if let summary = summaryRecord {
                 FocusSummaryView(record: summary,
-                                 summaryText: summaryText,
+                                 summaryText: summary.summary ?? summaryText,
                                  isLoading: summaryLoading) {
                     summaryRecord = nil
                     summaryText = nil
@@ -205,10 +205,13 @@ struct GlassDashboard: View {
         activeFocusRecord = FocusSessionRecord(startDate: startDate,
                                                target: focusDuration,
                                                endDate: nil,
-                                               capturedSessions: [])
+                                               capturedSessions: [],
+                                               summary: nil,
+                                               goal: focusGoal.isEmpty ? nil : focusGoal)
         lastSessionCount = tracker.todaySessions.count
         sessionTimer = Timer.publish(every: 1, on: .main, in: .common).autoconnect()
         isFocusPromptPresented = false
+        evaluatedSessions.removeAll()
     }
 
     private func stopSession() {
@@ -224,12 +227,42 @@ struct GlassDashboard: View {
                 let summary = await service.summarize(record: record)
                 await MainActor.run {
                     summaryText = summary ?? "Summary unavailable."
+                    if let summary {
+                        summaryRecord?.summary = summary
+                        updateStoredSummary(recordID: record.id, summary: summary)
+                    }
                     summaryLoading = false
                 }
             }
         }
         activeSession = nil
         activeFocusRecord = nil
+        focusGoal = ""
+        evaluatedSessions.removeAll()
+    }
+
+    private func updateStoredSummary(recordID: UUID, summary: String) {
+        if let index = focusHistory.firstIndex(where: { $0.id == recordID }) {
+            focusHistory[index].summary = summary
+        }
+    }
+
+    private func handleNewSessions(_ sessions: [ActivitySession]) {
+        guard let goal = activeFocusRecord?.goal, !goal.isEmpty else { return }
+        for session in sessions {
+            guard session.duration >= minSessionDurationForEvaluation else { continue }
+            guard !evaluatedSessions.contains(session.id) else { continue }
+            evaluatedSessions.insert(session.id)
+            Task {
+                let relevant = await GreenPTService.shared.evaluate(goal: goal, session: session)
+                if let relevant = relevant, !relevant {
+                    await NotificationManager.shared.sendNotification(
+                        title: "Focus Alert",
+                        body: "Are you DISTRACTED to your \"\(goal)\ goal?""
+                    )
+                }
+            }
+        }
     }
 }
 
@@ -338,6 +371,44 @@ struct FocusControlButton: View {
         }
         .buttonStyle(.plain)
         .padding(.top, 12)
+    }
+}
+
+struct LastSessionButton: View {
+    let latestRecord: FocusSessionRecord?
+    @State private var showSummary = false
+
+    var body: some View {
+        Button {
+            if latestRecord != nil {
+                showSummary = true
+            }
+        } label: {
+            Label("Last Session", systemImage: "clock.arrow.circlepath")
+                .font(.headline.weight(.semibold))
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 12)
+                .background(
+                    RoundedRectangle(cornerRadius: 16, style: .continuous)
+                        .fill(LinearGradient(colors: [.green.opacity(0.9), .green.opacity(0.7)],
+                                             startPoint: .leading,
+                                             endPoint: .trailing))
+                )
+                .foregroundStyle(.white)
+                .opacity(latestRecord == nil ? 0.5 : 1.0)
+        }
+        .buttonStyle(.plain)
+        .disabled(latestRecord == nil)
+        .sheet(isPresented: $showSummary) {
+            if let record = latestRecord {
+                FocusSummaryView(record: record,
+                                 summaryText: record.summary,
+                                 isLoading: false) {
+                    showSummary = false
+                }
+            }
+        }
+        .padding(.top, 8)
     }
 }
 
@@ -516,6 +587,15 @@ struct FocusSummaryView: View {
                 Text(summaryDuration)
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
+                
+                Text("AI Summary")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+
+                if let goal = record.goal, !goal.isEmpty {
+                    Text("Goal: \(goal)")
+                        .font(.subheadline.weight(.medium))
+                }
 
                 if isLoading {
                     HStack(spacing: 8) {
@@ -693,7 +773,8 @@ struct FocusSummaryView: View {
 struct FocusPrompt: View {
     @Binding var duration: TimeInterval
     @Binding var isPresented: Bool
-    let action: () -> Void
+    let action: (String) -> Void
+    @State private var goalText: String = ""
 
     var body: some View {
         ZStack {
@@ -720,8 +801,11 @@ struct FocusPrompt: View {
                     set: { duration = $0 * 60 }
                 ), in: 1...120, step: 1)
 
+                TextField("Optional focus goal (e.g., \"Max likelihood notes\")", text: $goalText)
+                    .textFieldStyle(.roundedBorder)
+
                 Button {
-                    action()
+                    action(goalText.trimmingCharacters(in: .whitespacesAndNewlines))
                     isPresented = false
                 } label: {
                     Text("Start")
@@ -893,6 +977,8 @@ struct FocusSessionRecord: Identifiable {
     let target: TimeInterval
     var endDate: Date?
     var capturedSessions: [ActivitySession]
+    var summary: String?
+    var goal: String?
 }
 
 struct AppSummary: Identifiable {

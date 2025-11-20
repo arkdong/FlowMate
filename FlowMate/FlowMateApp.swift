@@ -14,6 +14,7 @@ struct FlowMateApp: App {
     init() {
         #if os(macOS)
         AccessibilityPermission.ensure()
+        NotificationManager.shared.requestAuthorization()
         #endif
     }
 

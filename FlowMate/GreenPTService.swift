@@ -20,6 +20,22 @@ struct GreenPTService {
         return await send(messages: messages)
     }
 
+    func evaluate(goal: String, session: ActivitySession) async -> Bool? {
+        let description = describe(session: session)
+        let prompt = """
+                    Goal: \(goal)
+                    Session: \(description)
+                    Does the context of this session directly support the goal above? Do not consider the App mainly reason on the context. Respond only with true or false.
+                    """
+        guard let response = await send(messages: [ChatMessage(role: "user", content: prompt)]) else {
+            return nil
+        }
+        let trimmed = response.lowercased().trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed == "true" { return true }
+        if trimmed == "false" { return false }
+        return nil
+    }
+
     private func buildPrompt(for record: FocusSessionRecord) -> String {
         var lines: [String] = []
         let duration = (record.endDate ?? Date()).timeIntervalSince(record.startDate).formattedFocus
@@ -44,7 +60,7 @@ struct GreenPTService {
         } else {
             lines.append("No detailed context captured; infer from app usage only.")
         }
-        lines.append("Provide one sentence summary emphasizing the main topic or task inferred from the descriptions above.")
+        lines.append("Analysis the Apps usage and topic, return 2 core topics in comma that is most relevent within this session, with no extra words")
         return lines.joined(separator: "\n")
     }
 
@@ -113,6 +129,31 @@ struct GreenPTService {
             return "\(context.windowTitle) · \(snippet.prefix(80))"
         }
         return context.windowTitle
+    }
+
+    private func describe(session: ActivitySession) -> String {
+        var parts: [String] = []
+        parts.append("App: \(session.appName)")
+        parts.append("Duration: \(session.duration.formattedFocus)")
+        if !session.contexts.isEmpty {
+            parts.append("Contexts:")
+            let usage = contextUsage(for: session)
+            for segment in usage.prefix(5) {
+                parts.append("- \(segment.description) for \(segment.duration.formattedFocus)")
+            }
+        } else if let context = session.latestContext {
+            parts.append("Context: \(readableDescription(for: context))")
+        }
+        return parts.joined(separator: "\n")
+    }
+
+    private func contextUsage(for session: ActivitySession) -> [ContextAggregate] {
+        var usage: [ContextAggregate] = []
+        let segments = contextSegments(for: session)
+        for segment in segments {
+            usage.append(ContextAggregate(description: segment.description, duration: segment.duration, percent: 0))
+        }
+        return usage
     }
 
     private func send(messages: [ChatMessage]) async -> String? {
