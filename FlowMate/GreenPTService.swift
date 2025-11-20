@@ -156,6 +156,27 @@ struct GreenPTService {
         return usage
     }
 
+    func evaluateConsistency(current: ActivitySession, history: [ActivitySession]) async -> Bool? {
+        let historyDescription = history.map { describe(session: $0) }.joined(separator: "\n\n")
+        let currentDescription = describe(session: current)
+        let prompt = """
+Past session context (use 80% majority for comparison):
+\(historyDescription)
+
+Current session:
+\(currentDescription)
+
+Reply with true if the current session matches the main topics above, otherwise false.
+"""
+        guard let response = await send(messages: [ChatMessage(role: "user", content: prompt)]) else {
+            return nil
+        }
+        let trimmed = response.lowercased().trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed == "true" { return true }
+        if trimmed == "false" { return false }
+        return nil
+    }
+
     private func send(messages: [ChatMessage]) async -> String? {
         let payload: [String: Any] = [
             "model": "green-l",

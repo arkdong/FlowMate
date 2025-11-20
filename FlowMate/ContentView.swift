@@ -248,18 +248,31 @@ struct GlassDashboard: View {
     }
 
     private func handleNewSessions(_ sessions: [ActivitySession]) {
-        guard let goal = activeFocusRecord?.goal, !goal.isEmpty else { return }
+        let goal = activeFocusRecord?.goal ?? ""
         for session in sessions {
             guard session.duration >= minSessionDurationForEvaluation else { continue }
             guard !evaluatedSessions.contains(session.id) else { continue }
             evaluatedSessions.insert(session.id)
             Task {
-                let relevant = await GreenPTService.shared.evaluate(goal: goal, session: session)
-                if let relevant = relevant, !relevant {
-                    await NotificationManager.shared.sendNotification(
-                        title: "Focus Alert",
-                        body: "Are you DISTRACTED to your \"\(goal)\ goal?""
-                    )
+                if goal.isEmpty {
+                    guard let record = activeFocusRecord else { return }
+                    let priorSessions = record.capturedSessions.filter { $0.id != session.id }
+                    guard !priorSessions.isEmpty else { return }
+                    let consistent = await GreenPTService.shared.evaluateConsistency(current: session, history: priorSessions)
+                    if let consistent = consistent, !consistent {
+                        await NotificationManager.shared.sendNotification(
+                            title: "Focus Alert",
+                            body: "\(session.appName) may not align with the rest of this session"
+                        )
+                    }
+                } else {
+                    let relevant = await GreenPTService.shared.evaluate(goal: goal, session: session)
+                    if let relevant = relevant, !relevant {
+                        await NotificationManager.shared.sendNotification(
+                            title: "Focus Alert",
+                            body: "Are you DISTRACTED from your goal: \"\(goal)\"?"
+                        )
+                    }
                 }
             }
         }
