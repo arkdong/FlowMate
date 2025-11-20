@@ -56,7 +56,7 @@ struct GlassDashboard: View {
     @State private var focusGoal: String = ""
     @State private var evaluatedSessions: Set<UUID> = []
     @State private var isFocusPaused = false
-    private let distractionEvaluationThreshold: TimeInterval = 15 // testing threshold
+    private let distractionEvaluationThreshold: TimeInterval = 1500 // testing threshold
     @State private var selectedModel: GreenPTModel = .greenL
     @State private var reasoningLevel: ReasoningLevel = .balanced
     @State private var totalEnergyKWh: Double = 0
