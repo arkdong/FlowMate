@@ -56,7 +56,7 @@ struct GlassDashboard: View {
     @State private var focusGoal: String = ""
     @State private var evaluatedSessions: Set<UUID> = []
     @State private var isFocusPaused = false
-    private let distractionEvaluationThreshold: TimeInterval = 1500 // testing threshold
+    private let distractionEvaluationThreshold: TimeInterval = 15 // testing threshold
     @State private var selectedModel: GreenPTModel = .greenL
     @State private var reasoningLevel: ReasoningLevel = .balanced
     @State private var totalEnergyKWh: Double = 0
@@ -300,7 +300,7 @@ struct GlassDashboard: View {
                     let priorSessions = record.capturedSessions.filter { $0.id != session.id }
                     guard !priorSessions.isEmpty else { return }
                     accountForPrompt()
-                    let consistent = await GreenPTService.shared.evaluateConsistency(current: session, history: priorSessions, model: selectedModel, reasoning: reasoningLevel)
+                    let consistent = await GreenPTService.shared.evaluateConsistency(current: session, history: priorSessions, model: selectedModel, reasoning: .concise)
                     if let consistent = consistent, !consistent {
                         NotificationManager.shared.sendNotification(
                             title: "Focus Alert",
@@ -309,7 +309,7 @@ struct GlassDashboard: View {
                     }
                 } else {
                     accountForPrompt()
-                    let relevant = await GreenPTService.shared.evaluate(goal: goal, session: session, model: selectedModel, reasoning: reasoningLevel)
+                    let relevant = await GreenPTService.shared.evaluate(goal: goal, session: session, model: selectedModel, reasoning: .concise)
                     if let relevant = relevant, !relevant {
                         NotificationManager.shared.sendNotification(
                             title: "Focus Alert",
