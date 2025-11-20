@@ -55,7 +55,12 @@ struct GlassDashboard: View {
     @State private var summaryLoading = false
     @State private var focusGoal: String = ""
     @State private var evaluatedSessions: Set<UUID> = []
-    private let minSessionDurationForEvaluation: TimeInterval = 30 // testing threshold
+    @State private var isFocusPaused = false
+    private let distractionEvaluationThreshold: TimeInterval = 15 // testing threshold
+    @State private var selectedModel: GreenPTModel = .greenL
+    @State private var reasoningLevel: ReasoningLevel = .balanced
+    @State private var totalEnergyKWh: Double = 0
+    @State private var totalCO2Kg: Double = 0
 
     var body: some View {
         VStack(alignment: .leading, spacing: 18) {
@@ -64,7 +69,10 @@ struct GlassDashboard: View {
                     CloseButton(action: onClose)
                 }
                 Spacer()
-                TrackingStatusToggle(isActive: isTrackingEnabled, toggle: toggleTracking)
+                TrackingStatusToggle(isActive: isTrackingEnabled, toggle: {
+                    toggleTracking()
+                    handleTrackingToggle(isActive: !isTrackingEnabled)
+                })
             }
             .padding(.bottom, 4)
 
@@ -74,7 +82,7 @@ struct GlassDashboard: View {
             }
             #endif
 
-            SessionHeader(activeSession: activeSession, totalDuration: totalDuration)
+            SessionHeader(activeSession: activeSession, totalDuration: totalDuration, sessionCount: focusSessionCount)
 
             GlassProgressView(
                 value: progressValue,
@@ -94,6 +102,12 @@ struct GlassDashboard: View {
             if activeSession == nil && (!focusHistory.isEmpty || activeFocusRecord != nil) {
                 LastSessionButton(latestRecord: focusHistory.last ?? activeFocusRecord)
             }
+
+            ModelSelector(selectedModel: $selectedModel,
+                           reasoningLevel: $reasoningLevel,
+                           totalEnergyKWh: totalEnergyKWh,
+                           totalCO2Kg: totalCO2Kg)
+                .padding(.top, 8)
 
             if displayedSessions.isEmpty {
                 Text("No sessions recorded yet. Start working in any app to see activity here.")
@@ -140,6 +154,7 @@ struct GlassDashboard: View {
                 .presentationDetents([.fraction(0.25)])
         }
         .onReceive(sessionTimer) { _ in
+            guard !isFocusPaused else { return }
             guard var session = activeSession else { return }
             session.elapsed = Date().timeIntervalSince(session.startDate)
             activeSession = session
@@ -160,6 +175,9 @@ struct GlassDashboard: View {
                 handleNewSessions(Array(newSessions))
             }
             lastSessionCount = sessions.count
+        }
+        .onChange(of: isTrackingEnabled) { newValue in
+            handleFocusPauseState(isActive: newValue)
         }
         .overlay {
             if isFocusPromptPresented {
@@ -199,6 +217,10 @@ struct GlassDashboard: View {
         return min(goalProgress, 1)
     }
 
+    private var focusSessionCount: Int {
+        focusHistory.count + (activeSession != nil ? 1 : 0)
+    }
+
     private func startSession() {
         let startDate = Date()
         activeSession = FocusSession(startDate: startDate, target: focusDuration, elapsed: 0)
@@ -223,8 +245,9 @@ struct GlassDashboard: View {
             summaryLoading = true
             summaryText = nil
             Task {
+                accountForPrompt()
                 let service = GreenPTService.shared
-                let summary = await service.summarize(record: record)
+                let summary = await service.summarize(record: record, model: selectedModel, reasoning: reasoningLevel)
                 await MainActor.run {
                     summaryText = summary ?? "Summary unavailable."
                     if let summary {
@@ -247,10 +270,28 @@ struct GlassDashboard: View {
         }
     }
 
+    private func accountForPrompt() {
+        totalEnergyKWh += reasoningLevel.estimatedEnergyKWh
+        totalCO2Kg += reasoningLevel.estimatedCO2Kg
+    }
+
+    private func handleTrackingToggle(isActive: Bool) {
+        handleFocusPauseState(isActive: isActive)
+    }
+
+    private func handleFocusPauseState(isActive: Bool) {
+        if isActive {
+            isFocusPaused = false
+        } else if activeFocusRecord != nil {
+            isFocusPaused = true
+        }
+    }
+
     private func handleNewSessions(_ sessions: [ActivitySession]) {
+        guard !isFocusPaused else { return }
         let goal = activeFocusRecord?.goal ?? ""
         for session in sessions {
-            guard session.duration >= minSessionDurationForEvaluation else { continue }
+            guard session.duration >= distractionEvaluationThreshold else { continue }
             guard !evaluatedSessions.contains(session.id) else { continue }
             evaluatedSessions.insert(session.id)
             Task {
@@ -258,17 +299,19 @@ struct GlassDashboard: View {
                     guard let record = activeFocusRecord else { return }
                     let priorSessions = record.capturedSessions.filter { $0.id != session.id }
                     guard !priorSessions.isEmpty else { return }
-                    let consistent = await GreenPTService.shared.evaluateConsistency(current: session, history: priorSessions)
+                    accountForPrompt()
+                    let consistent = await GreenPTService.shared.evaluateConsistency(current: session, history: priorSessions, model: selectedModel, reasoning: reasoningLevel)
                     if let consistent = consistent, !consistent {
-                        await NotificationManager.shared.sendNotification(
+                        NotificationManager.shared.sendNotification(
                             title: "Focus Alert",
                             body: "\(session.appName) may not align with the rest of this session"
                         )
                     }
                 } else {
-                    let relevant = await GreenPTService.shared.evaluate(goal: goal, session: session)
+                    accountForPrompt()
+                    let relevant = await GreenPTService.shared.evaluate(goal: goal, session: session, model: selectedModel, reasoning: reasoningLevel)
                     if let relevant = relevant, !relevant {
-                        await NotificationManager.shared.sendNotification(
+                        NotificationManager.shared.sendNotification(
                             title: "Focus Alert",
                             body: "Are you DISTRACTED from your goal: \"\(goal)\"?"
                         )
@@ -384,6 +427,177 @@ struct FocusControlButton: View {
         }
         .buttonStyle(.plain)
         .padding(.top, 12)
+    }
+}
+
+struct ModelSelector: View {
+    @Binding var selectedModel: GreenPTModel
+    @Binding var reasoningLevel: ReasoningLevel
+    let totalEnergyKWh: Double
+    let totalCO2Kg: Double
+    @State private var showPicker = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Button {
+                showPicker = true
+            } label: {
+                HStack(spacing: 10) {
+                    Image(systemName: selectedModel.iconName)
+                        .font(.title3)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(selectedModel.displayName)
+                            .font(.headline)
+                        Text(selectedModel.description)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                    Text(reasoningLevel.displayName)
+                        .font(.footnote)
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 4)
+                        .background(Capsule().fill(Color.white.opacity(0.12)))
+                    Image(systemName: "chevron.up.chevron.down")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                .padding(14)
+                .frame(maxWidth: .infinity)
+                .background(
+                    RoundedRectangle(cornerRadius: 18, style: .continuous)
+                        .fill(Color.white.opacity(0.08))
+                )
+            }
+            .buttonStyle(.plain)
+            SustainabilityCard(totalEnergyKWh: totalEnergyKWh, totalCO2Kg: totalCO2Kg)
+        }
+        .sheet(isPresented: $showPicker) {
+            ModelPicker(selectedModel: $selectedModel, reasoningLevel: $reasoningLevel)
+        }
+    }
+}
+
+struct ModelPicker: View {
+    @Binding var selectedModel: GreenPTModel
+    @Binding var reasoningLevel: ReasoningLevel
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        NavigationView {
+            Form {
+                Section("Model") {
+                    ForEach(GreenPTModel.allCases, id: \.self) { model in
+                        Button {
+                            selectedModel = model
+                            dismiss()
+                        } label: {
+                            HStack(spacing: 16) {
+                                Image(systemName: model.iconName)
+                                    .font(.title2)
+                                    .frame(width: 36, height: 36)
+                                    .padding(8)
+                                    .background(Color.white.opacity(0.1), in: Circle())
+                                VStack(alignment: .leading, spacing: 4) {
+                                    Text(model.displayName)
+                                        .font(.headline)
+                                    Text(model.description)
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                }
+                                Spacer()
+                                if model == selectedModel {
+                                    Image(systemName: "checkmark.circle.fill")
+                                        .font(.title2)
+                                        .foregroundStyle(.blue)
+                                }
+                            }
+                            .padding(.vertical, 6)
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+
+                Section("Reasoning Level") {
+                    ForEach(ReasoningLevel.allCases, id: \.self) { level in
+                        Button {
+                            reasoningLevel = level
+                        } label: {
+                            HStack {
+                                Image(systemName: level.iconName)
+                                    .foregroundStyle(.secondary)
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(level.displayName)
+                                        .font(.headline)
+                                    Text(level.description)
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                }
+                                Spacer()
+                                if level == reasoningLevel {
+                                    Image(systemName: "checkmark.circle.fill")
+                                        .foregroundStyle(.blue)
+                                }
+                            }
+                            .padding(.vertical, 4)
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+            }
+            .navigationTitle("Model & Reasoning")
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Close") { dismiss() }
+                }
+            }
+        }
+        .frame(minWidth: 420, minHeight: 460)
+    }
+}
+
+struct SustainabilityCard: View {
+    let totalEnergyKWh: Double
+    let totalCO2Kg: Double
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Label {
+                Text("Energy & CO₂")
+                    .font(.system(size: 20, weight: .semibold, design: .rounded))
+            } icon: {
+                Image(systemName: "leaf.arrow.circlepath")
+                    .font(.system(size: 20, weight: .semibold))
+                    .symbolRenderingMode(.multicolor)
+            }
+            .padding(.top, 12)
+
+            energyBar
+            co2Bar
+        }
+        .padding(16)
+        .background(
+            RoundedRectangle(cornerRadius: 20, style: .continuous)
+                .fill(Color.white.opacity(0.05))
+        )
+    }
+
+    private var energyBar: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text("Energy: \(totalEnergyKWh, specifier: "%.3f") kWh")
+                .font(.caption)
+            ProgressView(value: min(totalEnergyKWh / 0.5, 1))
+                .tint(.green)
+        }
+    }
+
+    private var co2Bar: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text("CO₂: \(totalCO2Kg, specifier: "%.3f") kg")
+                .font(.caption)
+            ProgressView(value: min(totalCO2Kg / 0.2, 1))
+                .tint(.orange)
+        }
     }
 }
 
@@ -587,7 +801,7 @@ struct FocusSummaryView: View {
 
             VStack(alignment: .leading, spacing: 16) {
                 HStack {
-                    Text("Session Summary")
+                    Text("Focus Session Summary")
                         .font(.title2.weight(.semibold))
                     Spacer()
                     Button(action: dismiss) {
@@ -598,11 +812,11 @@ struct FocusSummaryView: View {
                 }
 
                 Text(summaryDuration)
-                    .font(.subheadline)
+                    .font(.title2)
                     .foregroundStyle(.secondary)
                 
                 Text("AI Summary")
-                    .font(.subheadline)
+                    .font(.title2)
                     .foregroundStyle(.secondary)
 
                 if let goal = record.goal, !goal.isEmpty {
@@ -813,8 +1027,10 @@ struct FocusPrompt: View {
                     get: { duration / 60 },
                     set: { duration = $0 * 60 }
                 ), in: 1...120, step: 1)
-
-                TextField("Optional focus goal (e.g., \"Max likelihood notes\")", text: $goalText)
+                
+                Text("What is your goal?")
+                    .font(.title3.weight(.semibold))
+                TextField("Optional (e.g., \"Study Python\")", text: $goalText)
                     .textFieldStyle(.roundedBorder)
 
                 Button {
@@ -861,6 +1077,7 @@ struct FocusPrompt: View {
 struct SessionHeader: View {
     let activeSession: FocusSession?
     let totalDuration: TimeInterval
+    let sessionCount: Int
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
@@ -891,6 +1108,16 @@ struct SessionHeader: View {
                 Text("Tracked focus time")
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
+                Label {
+                    Text("\(sessionCount) session\(sessionCount == 1 ? "" : "s") today")
+                        .font(.system(size: 22, weight: .semibold, design: .rounded))
+                } icon: {
+                    Image(systemName: "calendar")
+                        .font(.system(size: 20, weight: .semibold))
+                }
+                .foregroundStyle(.primary)
+                .symbolRenderingMode(.multicolor)
+                .padding(.top, 6)
             }
         }
     }

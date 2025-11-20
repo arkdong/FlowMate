@@ -5,29 +5,25 @@ struct GreenPTService {
     private let endpoint = URL(string: "https://api.greenpt.ai/v1/chat/completions")!
     private let apiKey = "sk-hGORmAVgT3aF0YiBTxUqRp7mhxurgUCyntMSWR3Bv1A"
 
-    func summarize(record: FocusSessionRecord) async -> String? {
-        let prompt = buildPrompt(for: record)
+    func summarize(record: FocusSessionRecord, model: GreenPTModel, reasoning: ReasoningLevel) async -> String? {
+        let prompt = buildPrompt(for: record, reasoning: reasoning)
         let messages = [
             ChatMessage(role: "user", content: prompt)
         ]
-        return await send(messages: messages)
+        return await send(messages: messages, model: model)
     }
 
-    func sendHelloTest() async -> String? {
+    func sendHelloTest(model: GreenPTModel = .greenL) async -> String? {
         let messages = [
             ChatMessage(role: "user", content: "Hello, how are you?")
         ]
-        return await send(messages: messages)
+        return await send(messages: messages, model: model)
     }
 
-    func evaluate(goal: String, session: ActivitySession) async -> Bool? {
+    func evaluate(goal: String, session: ActivitySession, model: GreenPTModel, reasoning: ReasoningLevel) async -> Bool? {
         let description = describe(session: session)
-        let prompt = """
-                    Goal: \(goal)
-                    Session: \(description)
-                    Does the context of this session directly support the goal above? Do not consider the App mainly reason on the context. Respond only with true or false.
-                    """
-        guard let response = await send(messages: [ChatMessage(role: "user", content: prompt)]) else {
+        let prompt = reasoning.goalPrompt(goal: goal, sessionDescription: description)
+        guard let response = await send(messages: [ChatMessage(role: "user", content: prompt)], model: model) else {
             return nil
         }
         let trimmed = response.lowercased().trimmingCharacters(in: .whitespacesAndNewlines)
@@ -36,7 +32,7 @@ struct GreenPTService {
         return nil
     }
 
-    private func buildPrompt(for record: FocusSessionRecord) -> String {
+    private func buildPrompt(for record: FocusSessionRecord, reasoning: ReasoningLevel) -> String {
         var lines: [String] = []
         let duration = (record.endDate ?? Date()).timeIntervalSince(record.startDate).formattedFocus
         lines.append("Focus session duration: \(duration).")
@@ -60,7 +56,7 @@ struct GreenPTService {
         } else {
             lines.append("No detailed context captured; infer from app usage only.")
         }
-        lines.append("Analysis the Apps usage and topic, return 2 core topics in comma that is most relevent within this session, with no extra words")
+        lines.append(reasoning.summaryInstruction)
         return lines.joined(separator: "\n")
     }
 
@@ -155,20 +151,12 @@ struct GreenPTService {
         }
         return usage
     }
-
-    func evaluateConsistency(current: ActivitySession, history: [ActivitySession]) async -> Bool? {
+    
+    func evaluateConsistency(current: ActivitySession, history: [ActivitySession], model: GreenPTModel, reasoning: ReasoningLevel) async -> Bool? {
         let historyDescription = history.map { describe(session: $0) }.joined(separator: "\n\n")
         let currentDescription = describe(session: current)
-        let prompt = """
-Past session context (use 80% majority for comparison):
-\(historyDescription)
-
-Current session:
-\(currentDescription)
-
-Reply with true if the current session matches the main topics above, otherwise false.
-"""
-        guard let response = await send(messages: [ChatMessage(role: "user", content: prompt)]) else {
+        let prompt = reasoning.consistencyPrompt(history: historyDescription, current: currentDescription)
+        guard let response = await send(messages: [ChatMessage(role: "user", content: prompt)], model: model) else {
             return nil
         }
         let trimmed = response.lowercased().trimmingCharacters(in: .whitespacesAndNewlines)
@@ -177,9 +165,9 @@ Reply with true if the current session matches the main topics above, otherwise 
         return nil
     }
 
-    private func send(messages: [ChatMessage]) async -> String? {
+    private func send(messages: [ChatMessage], model: GreenPTModel) async -> String? {
         let payload: [String: Any] = [
-            "model": "green-l",
+            "model": model.rawValue,
             "messages": messages.map { ["role": $0.role, "content": $0.content] },
             "stream": false
         ]

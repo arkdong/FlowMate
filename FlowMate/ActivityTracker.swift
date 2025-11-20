@@ -20,6 +20,9 @@ final class ActivityTracker: ObservableObject {
     private var notifications: [NSObjectProtocol] = []
     private let calendar = Calendar.current
     private let ownBundleIdentifier = Bundle.main.bundleIdentifier
+    private let breakThreshold: TimeInterval = 1000 // testing threshold
+    private var breakTimer: Timer?
+    private var breakSessionID: UUID?
 
     init(sessionStore: SessionStore = SessionStore()) {
         self.sessionStore = sessionStore
@@ -122,10 +125,12 @@ final class ActivityTracker: ObservableObject {
         }
         let context = contextOverride ?? inspector.captureContext(for: app)
         let appName = app.localizedName ?? app.bundleIdentifier ?? "Unknown"
-        currentSession = ActivitySession(appName: appName,
-                                         bundleIdentifier: app.bundleIdentifier ?? "unknown",
-                                         startDate: contextOverride?.capturedAt ?? startDate,
-                                         initialContext: context)
+        let session = ActivitySession(appName: appName,
+                                      bundleIdentifier: app.bundleIdentifier ?? "unknown",
+                                      startDate: contextOverride?.capturedAt ?? startDate,
+                                      initialContext: context)
+        currentSession = session
+        scheduleBreakReminder(for: session)
     }
 
     private func finishCurrentSession(at date: Date = Date()) {
@@ -135,6 +140,7 @@ final class ActivityTracker: ObservableObject {
         todaySessions.append(session)
         trimSessionsToToday()
         currentSession = nil
+        invalidateBreakReminder()
     }
 
     private func trimSessionsToToday() {
@@ -159,6 +165,28 @@ final class ActivityTracker: ObservableObject {
         } else {
             finishCurrentSession()
         }
+    }
+
+    private func scheduleBreakReminder(for session: ActivitySession) {
+        guard breakThreshold > 0 else { return }
+        invalidateBreakReminder()
+        breakSessionID = session.id
+        breakTimer = Timer.scheduledTimer(withTimeInterval: breakThreshold, repeats: false) { [weak self] _ in
+            guard let self,
+                  let current = self.currentSession,
+                  current.id == session.id else { return }
+            NotificationManager.shared.sendNotification(
+                title: "Break Reminder",
+                body: "You've been working hard, time to take a 5 minute break?"
+            )
+        }
+        RunLoop.main.add(breakTimer!, forMode: .common)
+    }
+
+    private func invalidateBreakReminder() {
+        breakTimer?.invalidate()
+        breakTimer = nil
+        breakSessionID = nil
     }
 }
 #else
